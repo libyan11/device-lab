@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Lab: automated tests</title>
+<style>
+  :root { --bg: #f5f6f8; --card: #fff; --text: #1b1f24; --muted: #5d6673; --border: #dde1e6; --ok: #1f8a4c; --bad: #c62f2f; --accent: #2f6fde; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #14171b; --card: #1d2127; --text: #e6e9ed; --muted: #9aa3ae; --border: #2e343c; --ok: #3cbf74; --bad: #ef5d5d; --accent: #5b8ff0; } }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 20px 16px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  #summary { font-size: 1.2rem; font-weight: 700; }
+  .pass { color: var(--ok); } .fail { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 5px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+  td:first-child { width: 48px; font-weight: 700; }
+  .scn td { font-weight: 700; background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .muted { color: var(--muted); }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  /* Kept inside the viewport: browsers pause animation frames in offscreen iframes, and the page under test needs them. */
+  iframe { position: fixed; right: 8px; bottom: 8px; width: 420px; height: 260px; z-index: 5; border: 2px solid var(--accent); border-radius: 10px; background: #fff; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Device Lab: automated tests</h1>
+  <p class="muted">Unit-tests the analysis code, then drives the real Device Lab page (devices.html) against simulated gamepads, keyboard, mouse, touch, microphone, camera, MIDI, HID, serial, USB and Bluetooth devices. Takes about two minutes. Keep this tab visible: background tabs run slower.</p>
+  <div class="card"><span id="summary">Starting…</span> <button id="again" hidden>Run again</button></div>
+  <div class="card"><table><tbody id="out"></tbody></table></div>
+  <iframe id="app" title="Device Lab under test"></iframe>
+</main>
+<script type="module">
+import * as core from "../devices/core.js";
+import * as mock from "./mock-devices.js";
+
+const out = document.getElementById("out"), frame = document.getElementById("app");
+let W, D, passed = 0, failed = 0, skipped = 0;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+function row(cls, a, b) { const tr = document.createElement("tr"); tr.className = cls; tr.innerHTML = `<td>${a}</td><td>${b}</td>`; out.appendChild(tr); tr.scrollIntoView({ block: "nearest" }); }
+const scenario = name => row("scn", "", name);
+function expect(cond, label, info = "") {
+  if (cond) { passed++; row("", `<span class="pass">PASS</span>`, label); }
+  else { failed++; row("", `<span class="fail">FAIL</span>`, `${label}<div class="muted">${esc(info)}</div>`); }
+}
+const skip = (label, why) => { skipped++; row("", `<span class="muted">SKIP</span>`, `${label}<div class="muted">${esc(why)}</div>`); };
+const near = (a, b, tol) => Math.abs(a - b) <= tol;
+
+// ---------- page helpers ----------
+const lab = () => W.deviceLab;
+async function loadApp() {
+  frame.src = "../devices.html?t=" + Date.now();
+  await new Promise(r => { frame.onload = r; });
+  W = frame.contentWindow; D = W.document;
+  for (let i = 0; i < 50 && !W.deviceLab; i++) await sleep(100);   // module scripts run after load
+}
+async function open(id) { lab().select(id); await sleep(150); }
+// The browser slows animation frames to ~1 per second when this window isn't focused, which would make timed tests meaningless.
+// Wait (and ask for a click) until the page under test is animating normally.
+async function live() {
+  const frames = () => new Promise(r => { let c = 0, stop = false; const f = () => { if (stop) return; c++; W.requestAnimationFrame(f); }; W.requestAnimationFrame(f); setTimeout(() => { stop = true; r(c); }, 400); });
+  let shown = false;
+  for (let i = 0; i < 600; i++) {
+    if (await frames() >= 8) { if (shown) document.getElementById("summary").textContent = "Running…"; return; }
+    if (!shown) { shown = true; document.getElementById("summary").textContent = "Paused: click anywhere on this page (the browser slows animation when the window isn't focused)"; }
+    await sleep(200);
+  }
+}
+const q = sel => D.querySelector(sel);
+const tclick = async sel => { await live(); click(sel); };
+// Wait until a timed test's button is enabled again, i.e. the test has finished, however slowly the browser ran it.
+const settle = async sel => { await sleep(400); await waitFor(() => !q(sel).disabled, 120000); await sleep(150); };
+const click = sel => { const el = q(sel); if (!el) throw new Error("missing " + sel); el.click(); };
+function check(key) {
+  const r = lab().results.get(key);
+  return r ? { status: r.status, text: r.detail } : { status: "missing", text: "(no result recorded; have: " + [...lab().results.keys()].join(", ") + ")" };
+}
+function expectCheck(key, status, label) { const c = check(key); expect(c.status === status, `${label}: ${status}`, `got ${c.status}: ${c.text}`); }
+async function waitFor(fn, ms = 15000) { const t = Date.now(); while (Date.now() - t < ms) { if (fn()) return true; await sleep(100); } return false; }
+async function answer(label, n = 1) {   // click a button in an open question box
+  for (let i = 0; i < n; i++) {
+    await waitFor(() => q("[data-ask] button"), 5000);
+    const b = [...D.querySelectorAll("[data-ask] button")].find(x => x.textContent === label);
+    if (!b) throw new Error("no answer button " + label); b.click(); await sleep(200);
+  }
+}
+const key = (type, code) => W.dispatchEvent(new W.KeyboardEvent(type, { code, key: code, bubbles: true, cancelable: true }));
+const ptr = (el, type, o = {}) => el.dispatchEvent(new W.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", ...o }));
+const busy = ms => { const t = performance.now(); while (performance.now() - t < ms); };
+
+// ---------- 1. unit tests ----------
+function unitTests() {
+  scenario("Analysis code: gamepad identification and labels");
+  let g = core.parseGamepadId("Xbox 360 Controller (STANDARD GAMEPAD Vendor: 045e Product: 028e)");
+  expect(g.vendor === "045e" && g.product === "028e" && g.family === "xbox" && g.knownProduct && g.name === "Xbox 360 Controller", "Chrome-style Xbox 360 id parses", JSON.stringify(g));
+  g = core.parseGamepadId("057e-2009-Pro Controller");
+  expect(g.family === "nintendo" && g.name === "Switch Pro Controller", "Firefox-style Switch Pro id parses", JSON.stringify(g));
+  g = core.parseGamepadId("USB Gamepad  (Vendor: 0079 Product: 0011)");
+  expect(g.family === "generic" && !g.knownProduct && g.vendorName.includes("DragonRise"), "generic DragonRise pad is generic", JSON.stringify(g));
+  g = core.parseGamepadId("Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 09cc)");
+  expect(g.family === "playstation", "DualShock 4 is playstation family");
+  g = core.parseGamepadId("Some Xbox Clone (Vendor: 1234 Product: 5678)");
+  expect(g.family === "xbox", "unknown vendor with Xbox in the name is treated as xbox");
+  expect(core.parseGamepadId("garbage").name === "garbage" && core.parseGamepadId("").name === "Unknown gamepad", "garbage ids don't throw");
+  expect(core.buttonLabels("xbox", "standard", 17)[0] === "A" && core.buttonLabels("nintendo", "standard", 17)[0] === "B" && core.buttonLabels("playstation", "standard", 17)[0] === "Cross", "face button labels per family");
+  expect(core.buttonLabels("xbox", "", 3).join() === "Button 0,Button 1,Button 2", "non-standard mapping gets generic labels");
+  expect(core.analogTriggers("xbox") && !core.analogTriggers("nintendo"), "Switch triggers are expected to be digital");
+
+  scenario("Analysis code: sticks and triggers");
+  const rest = Array.from({ length: 200 }, () => [0.005 + Math.random() * 0.004, -0.004]);
+  expect(core.rateRest(core.restStats(rest)) === "PASS", "centred stick rates PASS");
+  expect(core.rateRest(core.restStats(Array.from({ length: 50 }, () => [0.09, 0.02]))) === "WARN", "9% offset rates WARN");
+  const drift = core.restStats(Array.from({ length: 50 }, () => [0.2, -0.15]));
+  expect(core.rateRest(drift) === "FAIL" && near(drift.offset, 0.25, 0.001), "25% offset rates FAIL with the right size", JSON.stringify(drift));
+  expect(core.rateRest(core.restStats(Array.from({ length: 100 }, (_, i) => [i % 2 ? 0.1 : -0.1, 0]))) === "FAIL", "noisy stick rates FAIL");
+  expect(core.restStats([]) === null, "empty rest samples return null");
+  const circle = r => Array.from({ length: 400 }, (_, i) => [r * Math.cos(i / 400 * 2 * Math.PI), r * Math.sin(i / 400 * 2 * Math.PI)]);
+  expect(core.rateRange(core.rangeStats(circle(1))) === "PASS", "full-radius circle rates PASS");
+  expect(core.rateRange(core.rangeStats(circle(0.7))) === "FAIL", "70% radius circle rates FAIL");
+  expect(core.rateRange(core.rangeStats(circle(1).slice(0, 150))) === "INFO", "partial sweep rates INFO (not enough coverage)");
+  expect(core.rateRange(core.rangeStats(circle(1).map(([x, y]) => [x, y * 0.6]))) === "FAIL", "squashed (elliptical) range rates FAIL");
+  expect(core.distinctLevels(Array.from({ length: 256 }, (_, i) => i / 255)) === 256 && core.distinctLevels([0, 1, 1, 0]) === 2, "distinct level counting");
+  const fast = Array.from({ length: 61 }, (_, i) => ({ t: i * 16.67, ts: i })), slow = Array.from({ length: 61 }, (_, i) => ({ t: i * 16.67, ts: Math.floor(i / 6) }));
+  expect(core.updateRate(fast).share === 1 && near(core.updateRate(fast).hz, 60, 1), "fresh data every frame = 100% share, ~60 Hz");
+  expect(near(core.updateRate(slow).share, 0.17, 0.03), "fresh data every 6th frame = ~17% share", String(core.updateRate(slow).share));
+
+  scenario("Analysis code: keyboard, mouse, display");
+  const K = new core.KeyboardTracker();
+  ["KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ"].forEach((c, i) => K.keydown(c, i));
+  K.keydown("KeyA", 9, true);
+  expect(K.max === 7 && core.rolloverLabel(7).startsWith("6-key") && core.rolloverLabel(12).startsWith("full"), "rollover counts 7 keys held; auto-repeat is ignored");
+  K.keyup("KeyA", 1000); K.keydown("KeyA", 1010);
+  expect(K.chatter.length === 1 && K.chatter[0].gap === 10, "re-press 10 ms after release is chatter");
+  K.keyup("KeyA", 2000); K.keydown("KeyA", 2200);
+  expect(K.chatter.length === 1, "re-press 200 ms after release is normal");
+  expect(core.KB_CODES.length >= 100 && new Set(core.KB_CODES).size === core.KB_CODES.length, `keyboard layout has ${core.KB_CODES.length} unique keys`);
+  const ts = Array.from({ length: 200 }, (_, i) => i * 1);
+  expect(near(core.pollingRate(ts).hz, 1000, 5) && core.nearestPollingRate(980) === 1000 && core.nearestPollingRate(130) === 125, "1 ms spacing = 1000 Hz polling rate");
+  expect(near(core.pollingRate(Array.from({ length: 200 }, (_, i) => i * 8)).hz, 125, 2), "8 ms spacing = 125 Hz");
+  expect(core.pollingRate([0, 1, 2]).hz === 0, "too few samples gives no rate");
+  const C = new core.ClickAnalyzer(); C.down(0, 100); C.up(0, 180); C.down(0, 190); C.up(0, 192); C.down(2, 500); C.up(2, 600);
+  expect(C.chatter.length === 1 && C.bounces.length === 1 && C.count === 3, "click chatter and bounce detected", JSON.stringify([C.chatter, C.bounces]));
+  expect(core.wheelGlitches([1, 1, 1, 1, -1, 1, 1]).glitches === 1 && core.wheelGlitches([1, 1, 1, 1, 1, -1, -1, -1]).glitches === 0 && core.wheelGlitches([1, -1, 1, -1]).glitches === 0, "single backward wheel tick is a glitch; real reversals aren't");
+  const gc = core.gridCoverage([[0.05, 0.05], [0.95, 0.95], [0.5, 0.5]], 4, 4);
+  expect(gc.hit === 3 && gc.missed.length === 13, "grid coverage counts touched cells");
+  expect(near(core.refreshRate(Array.from({ length: 60 }, (_, i) => i * 16.667)).hz, 60, 0.5) && core.standardRefresh(143.6) === 144, "refresh rate from frame times");
+
+  scenario("Analysis code: audio, camera, MIDI, HID");
+  const sine = core.genSine(1000, 48000, 4800, 0.5), s = core.levelStats(sine);
+  expect(near(s.peak, 0.5, 0.01) && near(s.rmsDb, -9, 0.2) && s.clipped === 0, "level of a 0.5 sine: peak 0.5, RMS about -9 dB", JSON.stringify(s));
+  expect(core.levelStats(new Float32Array(100).fill(1)).clipped === 100, "full-scale samples count as clipped");
+  expect(near(core.goertzel(sine, 48000, 1000), 0.5, 0.02) && core.goertzel(sine, 48000, 3000) < 0.01, "Goertzel finds 1 kHz and not 3 kHz");
+  const noisy = sine.map(v => v + (Math.random() - 0.5) * 0.02);
+  expect(core.toneToNoise(noisy, 48000, 1000).ratio > 0.9 && core.toneToNoise(noisy, 48000, 2500).ratio < 0.1, "tone purity separates the real tone from a wrong frequency");
+  const flat = new Uint8ClampedArray(32 * 32 * 4).fill(128), dark = new Uint8ClampedArray(32 * 32 * 4).fill(5);
+  const sharp = new Uint8ClampedArray(32 * 32 * 4); for (let i = 0; i < sharp.length; i += 4) { const v = ((i / 4) % 2) * 255; sharp[i] = sharp[i + 1] = sharp[i + 2] = v; sharp[i + 3] = 255; }
+  expect(core.frameStats(flat, 32, 32).sharpness === 0 && core.frameStats(sharp, 32, 32).sharpness > 1000, "flat frame has no sharpness, checkerboard has a lot");
+  expect(core.rateCamera(core.frameStats(dark, 32, 32)).some(n => n.includes("black")) && core.rateCamera(core.frameStats(sharp, 32, 32)).length === 0, "dark frame flagged, healthy frame not");
+  expect(core.frameDiff(flat, flat) === 0 && core.frameDiff(flat, dark) > 100, "frame difference");
+  expect(JSON.stringify(core.parseMidi([0x93, 60, 100])) === JSON.stringify({ type: "note-on", channel: 4, note: 60, velocity: 100 }) && core.parseMidi([0x90, 60, 0]).type === "note-off" && core.parseMidi([0xB0, 7, 99]).cc === 7 && core.parseMidi([0xE0, 0, 0x40]).value === 0, "MIDI messages parse (note-on vel 0 = note-off)");
+  expect(core.noteName(60) === "C4" && core.noteName(69) === "A4", "note names");
+  const M = new core.MidiTracker(); M.feed([0x90, 60, 40]); M.feed([0x90, 62, 110]); M.feed([0x80, 60, 0]); M.feed([0xFE]); M.feed([0xB0, 1, 10]);
+  expect(M.on.size === 1 && M.velMin === 40 && M.velMax === 110 && M.count === 4 && M.ccs.size === 1, "MIDI tracker: stuck note, velocity range, ignores active sensing", JSON.stringify([M.on.size, M.velMin, M.velMax, M.count]));
+  const reps = Array.from({ length: 100 }, (_, n) => Uint8Array.of(n & 255, Math.round(Math.sin(n / 5) * 100 + 128), n % 2, 5));
+  const bm = core.byteMap(reps);
+  expect(bm[0].kind === "counter" && bm[1].kind === "analog" && bm[2].kind === "flags" && bm[3].kind === "constant", "HID byte map classifies counter, analog, flag and constant bytes", bm.map(b => b.kind).join());
+
+  scenario("Analysis code: appliance sound and vibration");
+  const SR = 48000, tone = (f, a = 0.3, n = 16384) => core.genSine(f, SR, n, a), noiseF = (a = 0.05, n = 16384) => Float32Array.from({ length: n }, () => (Math.random() * 2 - 1) * a);
+  const sp1 = core.magSpectrum(tone(1000, 0.5), SR);
+  const pk = core.spectralPeaks(sp1, 1)[0];
+  expect(near(pk.hz, 1000, 4) && near(pk.mag, 0.5, 0.08), "spectrum finds a 0.5-amplitude 1 kHz sine", JSON.stringify(pk));
+  const t900 = tone(900, 0.1), two = core.magSpectrum(tone(300, 0.4).map((v, i) => v + t900[i]), SR), tp = core.spectralPeaks(two, 2);
+  expect(near(tp[0].hz, 300, 4) && near(tp[1].hz, 900, 4), "two tones come out loudest first", JSON.stringify(tp));
+  expect(core.bandShare(sp1, 1000, 10) > 0.9 && core.spectralFlatness(sp1) < 0.01 && core.spectralFlatness(core.magSpectrum(noiseF(), SR)) > 0.3, "a tone is concentrated in its band and not flat; noise is flat");
+  const a50 = tone(50, 0.2), b100 = tone(100, 0.1), n1 = noiseF(0.002), a60 = tone(60, 0.2);
+  const h50 = core.humCheck(core.magSpectrum(a50.map((v, i) => v + b100[i] + n1[i]), SR)), h60 = core.humCheck(core.magSpectrum(a60.map((v, i) => v + n1[i]), SR));
+  expect(h50.hz === 50 && h50.share > 0.8 && h60.hz === 60 && core.humCheck(core.magSpectrum(noiseF(), SR)).share < 0.1, "mains hum recognised at 50 and 60 Hz, absent in noise", JSON.stringify([h50, h60]));
+  const quiet = core.runSummary(Array.from({ length: 8 }, () => noiseF(0.003)), SR), steady = core.runSummary(Array.from({ length: 8 }, () => tone(220, 0.3)), SR);
+  expect(near(steady.dominantHz, 220, 4) && steady.tonal > 0.8 && steady.wobble < 0.05 && steady.rmsDb - quiet.rmsDb > 30, "run summary: steady 220 Hz tone, 30+ dB above quiet", JSON.stringify({ hz: steady.dominantHz, t: steady.tonal, w: steady.wobble, d: steady.rmsDb - quiet.rmsDb }));
+  const wob = core.runSummary(Array.from({ length: 8 }, (_, i) => tone(220, i % 2 ? 0.4 : 0.05)), SR);
+  expect(wob.wobble > 0.3, "loudness that jumps around shows high variation", String(wob.wobble));
+  const sev = j => j.map(x => x.status).join();
+  expect(sev(core.judgeAppliance(quiet, steady)).startsWith("PASS,PASS") && core.judgeAppliance(quiet, steady).some(x => x.text.includes("220")), "judge: healthy appliance passes and names its tone", sev(core.judgeAppliance(quiet, steady)));
+  expect(core.judgeAppliance(quiet, core.runSummary(Array.from({ length: 8 }, () => noiseF(0.0035)), SR))[0].status === "FAIL", "judge: indistinguishable from background means not running");
+  expect(core.judgeAppliance(quiet, wob).some(x => x.status === "WARN" && x.text.includes("Loudness varies")), "judge: wobbling appliance warns about rattle/stutter");
+  const vib = Array.from({ length: 300 }, (_, i) => ({ t: i * 16.67, v: 9.81 + 1.5 * Math.sin(2 * Math.PI * 12 * i * 16.67 / 1000) }));
+  const vs = core.vibrationStats(vib);
+  expect(near(vs.hz, 12, 0.3) && near(vs.rms, 1.06, 0.1) && near(vs.rate, 60, 1), "vibration: 12 Hz, 1.5 m/s2 amplitude measured", JSON.stringify(vs));
+  expect(core.vibrationStats(vib.slice(0, 5)).hz === 0 && core.vibrationStats(vib.map(s => ({ t: s.t, v: 9.81 }))).rms < 0.001, "vibration: too few samples and a still phone give nothing / zero");
+  const lb = new core.LineBuffer();
+  expect(JSON.stringify(lb.push("ab\r\ncd")) === '["ab"]' && JSON.stringify(lb.push("ef\n")) === '["cdef"]', "serial line buffer joins split chunks");
+  expect(core.usbClassName(3) === "HID (human interface)" && core.usbClassName(0x42).startsWith("Class") && core.vendorName(0x045e) === "Microsoft", "USB class and vendor names");
+}
+
+// ---------- 2. page scenarios ----------
+async function gamepadScenarios() {
+  await open("overview");
+  const pad = mock.installGamepad(W);
+  await open("gamepad"); await sleep(400);
+
+  scenario("Gamepads: Xbox 360 controller");
+  expect(!!q("[data-module=gamepad] #gpLive:not(.hidden)"), "controller appears without any clicks");
+  expect(q("#gpInfo").textContent.includes("Xbox 360 Controller") && q("#gpInfo").textContent.includes("Microsoft") && q("#gpInfo").textContent.includes("standard"), "identified as Microsoft Xbox 360 Controller, standard mapping", q("#gpInfo").textContent);
+  expect(q("#gpGrid").children[0].textContent === "A" && q("#gpGrid").children.length === 17 && q("#gpLTname").textContent === "LT", "Xbox button names and 17 buttons");
+  expectCheck("gamepad:detected", "INFO", "Detection result recorded");
+  pad.stick("L", 0.6, -0.3); await sleep(250);
+  expect(q("#gpTxtL").textContent.includes("0.60") && q("#gpTxtL").textContent.includes("-0.30"), "live left stick reading", q("#gpTxtL").textContent);
+  pad.press(0); await sleep(150);
+  expect(q("#gpGrid").children[0].classList.contains("on"), "A button lights up while held");
+  pad.press(0, 0); await sleep(150);
+  expect(q("#gpGrid").children[0].classList.contains("seen"), "A button stays marked as seen after release");
+  pad.stick("L", 0, 0);
+
+  scenario("Gamepads: healthy sticks, drift, range");
+  const hands = setInterval(() => { pad.stick("L", 0.01 + Math.random() * 0.004, -0.008); pad.stick("R", -0.012, 0.015 + Math.random() * 0.004); }, 8);
+  await tclick("#gpDrift"); await waitFor(() => check("gamepad:drift-Right stick").status !== "missing", 6000); clearInterval(hands);
+  expectCheck("gamepad:drift-Left stick", "PASS", "Healthy left stick drift"); expectCheck("gamepad:drift-Right stick", "PASS", "Healthy right stick drift");
+  const bad = setInterval(() => { pad.stick("L", 0.2, -0.15); pad.stick("R", 0.01, 0.01); }, 8);
+  await tclick("#gpDrift"); await settle("#gpDrift"); clearInterval(bad);
+  expectCheck("gamepad:drift-Left stick", "FAIL", "Drifting left stick (20%, -15%)"); expectCheck("gamepad:drift-Right stick", "PASS", "Right stick still fine");
+  expect(check("gamepad:drift-Left stick").text.includes("deadzone of about"), "drift result suggests a deadzone", check("gamepad:drift-Left stick").text);
+  let a = 0; const spin = r1 => setInterval(() => { a += 0.05; pad.stick("L", r1 * Math.cos(a), r1 * Math.sin(a)); pad.stick("R", 0.72 * Math.cos(a), 0.72 * Math.sin(a)); }, 8);
+  let h = spin(1); await tclick("#gpRange"); await settle("#gpRange"); clearInterval(h);
+  expectCheck("gamepad:range-Left stick", "PASS", "Full circular left stick range"); expectCheck("gamepad:range-Right stick", "FAIL", "Right stick that only reaches 72%");
+
+  scenario("Gamepads: triggers, update rate, buttons, rumble");
+  let p = 0; h = setInterval(() => { p += 0.004; const v = (1 - Math.cos(p * Math.PI * 2 * 3)) / 2; pad.trigger("L", Math.round(v * 255) / 255); pad.trigger("R", Math.round(v * 255) / 255); }, 8);
+  await tclick("#gpTrig"); await settle("#gpTrig"); clearInterval(h);
+  expectCheck("gamepad:trig-Left trigger", "PASS", "Analog left trigger"); expectCheck("gamepad:trig-Right trigger", "PASS", "Analog right trigger");
+  let on = false; h = setInterval(() => { on = !on; pad.trigger("L", on ? 1 : 0); pad.trigger("R", 0.3); }, 400);
+  await tclick("#gpTrig"); await settle("#gpTrig"); clearInterval(h);
+  expectCheck("gamepad:trig-Left trigger", "WARN", "Digital trigger on an Xbox pad (expected analog)"); expectCheck("gamepad:trig-Right trigger", "FAIL", "Trigger that only reaches 30%");
+  pad.trigger("L", 0); pad.trigger("R", 0);
+
+  h = setInterval(() => pad.stick("L", Math.random() - 0.5, Math.random() - 0.5), 8);
+  await tclick("#gpRate"); await settle("#gpRate");
+  expectCheck("gamepad:rate", "PASS", "120 Hz controller keeps up with the screen");
+  pad.start(8); await sleep(100); await tclick("#gpRate"); await settle("#gpRate"); clearInterval(h);
+  expectCheck("gamepad:rate", "FAIL", "8 Hz controller is too slow"); pad.start(120);
+
+  click("#gpBtns"); expectCheck("gamepad:buttons", "WARN", "Button record with most buttons unpressed");
+  expect(check("gamepad:buttons").text.includes("B"), "lists the unpressed buttons");
+  for (let i = 0; i < 17; i++) { pad.press(i); await sleep(70); pad.press(i, 0); await sleep(30); }
+  click("#gpBtns"); expectCheck("gamepad:buttons", "PASS", "All 17 buttons pressed");
+
+  click("#gpRumble"); await answer("Yes", 2); await sleep(300);
+  expect(pad.st.effects.length === 2 && pad.st.effects[0].strongMagnitude === 1 && pad.st.effects[0].weakMagnitude === 0 && pad.st.effects[1].weakMagnitude === 1, "rumble ran the strong then the weak motor", JSON.stringify(pad.st.effects));
+  expectCheck("gamepad:rumble", "PASS", "Rumble felt on both motors");
+  click("#gpRumble"); await answer("Yes"); await answer("No"); await sleep(300);
+  expectCheck("gamepad:rumble", "WARN", "Only one motor felt");
+  click("#gpRumble"); await answer("No", 2); await sleep(300);
+  expectCheck("gamepad:rumble", "FAIL", "No motors felt");
+  pad.remove();
+
+  scenario("Gamepads: Switch Pro (digital triggers are normal) and a generic non-standard pad");
+  const sw = mock.installGamepad(W, { id: "Pro Controller (STANDARD GAMEPAD Vendor: 057e Product: 2009)" });
+  await open("gamepad"); await sleep(400);
+  expect(q("#gpInfo").textContent.includes("Switch Pro") && q("#gpGrid").children[0].textContent === "B" && q("#gpLTname").textContent === "ZL", "Switch Pro: name, B at the bottom, ZL", q("#gpInfo").textContent);
+  on = false; h = setInterval(() => { on = !on; sw.trigger("L", on ? 1 : 0); sw.trigger("R", on ? 0 : 1); }, 300);
+  await tclick("#gpTrig"); await settle("#gpTrig"); clearInterval(h);
+  expectCheck("gamepad:trig-Left trigger", "INFO", "Digital ZL on a Switch Pro is normal");
+  sw.remove();
+  const gen = mock.installGamepad(W, { id: "USB Gamepad  (Vendor: 0079 Product: 0011)", mapping: "", buttons: 12, axes: 6, rumble: false });
+  await open("gamepad"); await sleep(400);
+  expect(q("#gpGrid").children.length === 12 && q("#gpGrid").children[0].textContent === "Button 0" && q("#gpInfo").textContent.includes("non-standard"), "generic pad: 12 generic buttons, non-standard mapping noted", q("#gpInfo").textContent);
+  expect(q("#gpAxes").children.length === 6, "6 raw axes shown");
+  await tclick("#gpTrig"); await settle("#gpTrig"); expectCheck("gamepad:triggers", "INFO", "Trigger test explains it needs the standard mapping");
+  click("#gpRumble"); await sleep(200); expectCheck("gamepad:rumble", "INFO", "Rumble reports it isn't available");
+  gen.remove();
+  await open("gamepad"); await sleep(300);
+  expect(!!q("#gpLive.hidden"), "no controller: live panel is hidden again");
+}
+
+async function inputScenarios() {
+  scenario("Keyboard");
+  await open("keyboard");
+  expect(D.querySelectorAll("#kbMap .key:not(.gap)").length === core.KB_CODES.length, "on-screen keyboard has every key");
+  for (const c of ["KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK"]) key("keydown", c);
+  expect(q("#kbMax").textContent.includes("8") && q("#kbMap .key.on"), "8 held keys counted and highlighted", q("#kbMax").textContent);
+  for (const c of ["KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK"]) key("keyup", c);
+  click("#kbRecord");
+  expectCheck("keyboard:rollover", "PASS", "8-key rollover"); expectCheck("keyboard:coverage", "INFO", "Only a few keys pressed so far");
+  expectCheck("keyboard:chatter", "PASS", "No chatter so far");
+  for (const c of core.KB_CODES) { key("keydown", c); busy(30); key("keyup", c); }
+  click("#kbRecord"); expectCheck("keyboard:coverage", "PASS", "All keys pressed");
+  click("#kbReset"); key("keydown", "KeyQ"); key("keyup", "KeyQ"); key("keydown", "KeyQ"); key("keyup", "KeyQ");
+  click("#kbRecord"); expectCheck("keyboard:chatter", "FAIL", "Key that fires twice within a few ms");
+  expect(check("keyboard:chatter").text.includes("KeyQ"), "names the chattering key");
+  key("keydown", "KeyW", true); expect(true, "auto-repeat key events don't throw");
+
+  scenario("Mouse");
+  await open("mouse"); const zone = q("#msZone");
+  expect(!!zone, "mouse test area exists");
+  for (const b of [0, 1, 2]) { ptr(zone, "pointerdown", { button: b }); busy(40); ptr(zone, "pointerup", { button: b }); busy(40); }
+  expect(D.querySelectorAll("#msBtns .seen").length === 3, "left, middle, right buttons marked");
+  zone.dispatchEvent(new W.WheelEvent("wheel", { deltaY: 100, bubbles: true, cancelable: true }));
+  for (const d of [100, 100, 100, 100, -100, 100, 100]) zone.dispatchEvent(new W.WheelEvent("wheel", { deltaY: d, bubbles: true, cancelable: true }));
+  click("#msRecord");
+  expectCheck("mouse:chatter", "PASS", "No click chatter"); expectCheck("mouse:wheel", "FAIL", "Backward tick in a steady scroll");
+  click("#msReset"); ptr(zone, "pointerdown", { button: 0 }); busy(60); ptr(zone, "pointerup", { button: 0 }); busy(5); ptr(zone, "pointerdown", { button: 0 }); busy(60); ptr(zone, "pointerup", { button: 0 });
+  click("#msRecord"); expectCheck("mouse:chatter", "FAIL", "Click re-registering 5 ms after release");
+  click("#msReset");
+  await tclick("#msRate");
+  const t0 = performance.now(); let n = 0; while (performance.now() - t0 < 900) { ptr(zone, "pointermove", { clientX: 10 + (n++ % 50) }); busy(2); }
+  await waitFor(() => check("mouse:polling").status !== "missing", 6500);
+  const pr = check("mouse:polling"); expect(pr.status === "PASS" && /About (4\d\d|5\d\d) Hz/.test(pr.text), "2 ms between moves reads as about 500 Hz", pr.status + " " + pr.text);
+
+  scenario("Touch & pen");
+  await open("touch"); const grid = q("#tcGrid"), r = grid.getBoundingClientRect();
+  const at = (x, y) => ({ clientX: r.left + x * r.width, clientY: r.top + y * r.height });
+  ptr(grid, "pointerdown", { pointerId: 5, pointerType: "touch", ...at(0.02, 0.02) });
+  for (let y = 0; y <= 1; y += 0.04) for (let x = 0; x <= 1; x += 0.04) ptr(grid, "pointermove", { pointerId: 5, pointerType: "touch", pressure: 0.2 + x * 0.6, ...at(x, y) });
+  ptr(grid, "pointerup", { pointerId: 5, pointerType: "touch" });
+  click("#tcRecord"); expectCheck("touch:grid", "PASS", "Sweeping the whole grid reaches every square");
+  expectCheck("touch:multitouch", "WARN", "Single finger only: warns about multi-touch");
+  click("#tcReset");
+  for (let i = 0; i < 10; i++) for (let x = 0; x < 0.5; x += 0.04) for (let y = 0; y <= 1; y += 0.04) { ptr(grid, "pointerdown", { pointerId: 10 + i, pointerType: "touch", ...at(x, y) }); ptr(grid, "pointermove", { pointerId: 10 + i, pointerType: "touch", ...at(x, y) }); ptr(grid, "pointerup", { pointerId: 10 + i, pointerType: "touch" }); }
+  for (let i = 0; i < 5; i++) ptr(grid, "pointerdown", { pointerId: 30 + i, pointerType: "touch", ...at(0.1, 0.1) });
+  click("#tcRecord");
+  const g = check("touch:grid"); expect(g.status !== "PASS" && g.text.includes("Unreached"), "left half only: dead zone listed on the right", g.status + " " + g.text);
+  expectCheck("touch:multitouch", "PASS", "5 fingers at once");
+
+  scenario("Display");
+  await open("display");
+  expect(check("display:screen").status === "INFO", "screen size recorded");
+  await tclick("#dpRate"); await settle("#dpRate");
+  const rr = check("display:refresh"); expect((rr.status === "PASS" || rr.status === "WARN") && /About \d+(\.\d)? Hz/.test(rr.text), "refresh rate measured", rr.status + " " + rr.text);
+  click("#dpBad"); expectCheck("display:pixels", "FAIL", "Reporting bad pixels"); click("#dpRecord"); expectCheck("display:pixels", "PASS", "Reporting clean screen");
+  click("#dpFill"); expect(!!D.getElementById("dpFull"), "colour test overlay opens");
+  D.getElementById("dpFull").click(); D.getElementById("dpFull").click();
+  W.dispatchEvent(new W.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await sleep(100);
+  expect(!D.getElementById("dpFull"), "Escape closes the colour test");
+}
+
+async function mediaScenarios() {
+  scenario("Microphone, speakers and camera");
+  const probe = new W.AudioContext(); await probe.resume().catch(() => {}); const audioOK = probe.state === "running"; probe.close();
+  const media = mock.installMedia(W);
+  await open("audio");
+  if (!audioOK) skip("Microphone tests", "the test page's audio engine is blocked until you click somewhere in this window; click the page once and run again");
+  else {
+    click("#auStart"); await waitFor(() => check("audio:open").status !== "missing", 5000);
+    expectCheck("audio:open", "PASS", "Microphone opens"); expect(!!q("#auLive:not(.hidden)"), "level meter appears");
+    await tclick("#auNoise"); await waitFor(() => check("audio:noise").status !== "missing", 4000);
+    expectCheck("audio:noise", "PASS", "Quiet room noise floor"); media.setTalking(true);
+    await tclick("#auSpeak"); await waitFor(() => check("audio:voice").status !== "missing", 5000);
+    expectCheck("audio:voice", "PASS", "Voice with no clipping"); expectCheck("audio:snr", "PASS", "Voice well above the noise floor"); media.setTalking(false);
+    media.gain.gain.value = 0.02;    // a noisy mic: hiss at about -37 dBFS
+    await tclick("#auNoise"); await waitFor(() => check("audio:noise").status !== "PASS", 4000); expectCheck("audio:noise", "FAIL", "Hissy microphone");
+    media.gain.gain.value = 0.0005;
+    await tclick("#auLoop"); await waitFor(() => check("audio:loopback").status !== "missing", 5000);
+    expectCheck("audio:loopback", "WARN", "Mock mic can't hear speakers, so loopback warns");
+  }
+  click("#auL"); await answer("Left"); await sleep(100); expectCheck("audio:spk-Left", "PASS", "Left tone heard on the left");
+  click("#auR"); await answer("Left"); await sleep(100); expectCheck("audio:spk-Right", "FAIL", "Right tone heard on the left: swapped channels");
+  click("#auC"); await answer("Nothing"); await sleep(100); expectCheck("audio:spk-Centre", "FAIL", "Silent speaker");
+  await open("overview");    // leaving the tab must release the mic
+  await sleep(200);
+  expect(media.streams.every(s => s.getAudioTracks().every(t => t.readyState === "ended")), "leaving the Audio tab stops the microphone");
+
+  await open("camera");
+  click("#cmStart"); await waitFor(() => check("camera:open").status !== "missing", 5000);
+  expectCheck("camera:open", "PASS", "Camera opens"); expect(!q("#cmVid").classList.contains("hidden"), "video preview shown");
+  await waitFor(() => q("#cmVid").readyState >= 2, 5000);
+  await tclick("#cmRun"); await waitFor(() => check("camera:quality").status !== "missing", 8000);
+  expectCheck("camera:live", "PASS", "Moving picture is live"); expectCheck("camera:quality", "PASS", "Colourful, detailed picture");
+  expect(check("camera:fps").status !== "missing", "frame rate measured", check("camera:fps").text);
+  media.stop(); await open("overview");
+
+  const bad = mock.installMedia(W); Object.defineProperty(W.navigator.mediaDevices, "getUserMedia", { configurable: true, value: async () => { throw new DOMException("Could not start video source", "NotReadableError"); } });
+  await open("camera"); click("#cmStart"); await sleep(400);
+  expectCheck("camera:open", "FAIL", "Camera in use by another app reports a clear failure"); expect(check("camera:open").text.includes("NotReadableError"), "failure includes the browser's reason"); bad.stop();
+}
+
+async function deviceScenarios() {
+  scenario("MIDI");
+  const midi = mock.installMidi(W, { ports: 2 });
+  await open("midi"); click("#mdStart"); await waitFor(() => check("midi:devices").status !== "missing", 3000);
+  expectCheck("midi:devices", "PASS", "MIDI inputs and outputs found"); expect(q("#mdPorts").textContent.includes("Mock Keys 0") && q("#mdPorts").textContent.includes("Mock Synth 1"), "ports listed by name");
+  midi.play([0x90, 60, 30]); midi.play([0x90, 64, 120]); midi.play([0x80, 60, 0]); midi.play([0xB0, 1, 64]); midi.play([0xFE]);
+  expect(q("#mdLog").textContent.includes("C4") && q("#mdLog").textContent.includes("CC 1"), "incoming notes and controllers logged", q("#mdLog").textContent);
+  click("#mdRecord"); expectCheck("midi:input", "PASS", "Keys played"); expectCheck("midi:stuck", "FAIL", "E4 never released");
+  midi.play([0x80, 64, 0]); click("#mdRecord"); expectCheck("midi:stuck", "PASS", "Released note clears the warning");
+  click("#mdSend"); await sleep(1200);
+  expect([...midi.access.outputs.values()].every(o => o.sent.length === 2 && o.sent[0][0] === 0x90 && o.sent[1][0] === 0x80), "test note sent to every output (note on then off)", JSON.stringify([...midi.access.outputs.values()].map(o => o.sent)));
+  Object.defineProperty(W.navigator, "requestMIDIAccess", { configurable: true, value: undefined }); await open("midi");
+  expect(!!D.querySelector("#panel .err") && D.querySelector("#panel .err").textContent.includes("Web MIDI"), "browser without Web MIDI shows a clear message instead of crashing", D.getElementById("panel").textContent.slice(0, 200));
+
+  scenario("Raw HID inspector");
+  const hid = mock.installHid(W);
+  await open("hid"); click("#hdPick"); await waitFor(() => !q("#hdMon").classList.contains("hidden"), 3000);
+  expect(q("#hdList").textContent.includes("Mock Arcade Stick") && q("#hdList").textContent.includes("1234:abcd") && q("#hdList").textContent.includes("Game Pad"), "device listed with IDs and its Game Pad usage", q("#hdList").textContent);
+  click("#hdStart"); await sleep(1500);
+  expect(/reports in/.test(q("#hdRate").textContent) && q("#hdMap tr:nth-child(2) td:nth-child(2)").textContent === "counter", "byte 0 identified as a counter while running", q("#hdMap").textContent.slice(0, 120));
+  click("#hdStop"); await sleep(100);
+  const hr = check("hid:reports"); expect(hr.status === "PASS" && /report ID 1/.test(hr.text) && /3 change|4 change/.test(hr.text), "HID result summarises changing bytes", hr.status + " " + hr.text);
+  hid.quiet = true; click("#hdStart"); await sleep(600); click("#hdStop"); await sleep(100);
+  expectCheck("hid:reports", "WARN", "Silent device warns instead of passing"); hid.stop();
+
+  scenario("Serial, USB and Bluetooth LE");
+  const pm = mock.installPorts(W);
+  await open("ports");
+  q("#spBaud").value = "9600"; click("#spConnect"); await waitFor(() => check("ports:open").status !== "missing", 3000);
+  expectCheck("ports:open", "PASS", "Serial port opens"); expect(pm.log.baud === 9600 && check("ports:open").text.includes("2341:0043"), "opened at the chosen baud, USB IDs shown", check("ports:open").text);
+  await sleep(500); expect(q("#spOut").textContent.includes("temp=21.5") && q("#spOut").textContent.includes("hum=40"), "serial lines received and split", q("#spOut").textContent.slice(0, 80));
+  q("#spIn").value = "hello"; click("#spSend"); await sleep(100); expect(pm.log.written.join("").includes("hello"), "typed line is written to the port");
+  click("#spRecord"); expectCheck("ports:data", "PASS", "Serial data flowing");
+  click("#spClose"); await sleep(300); expect(pm.log.closed, "disconnect closes the port");
+  click("#usbPick"); await waitFor(() => check("ports:usb-open").status !== "missing", 3000);
+  expect(q("#usbOut").textContent.includes("Mock USB Receiver") && q("#usbOut").textContent.includes("HID (human interface)") && q("#usbOut").textContent.includes("Logitech"), "USB descriptors shown, vendor resolved", q("#usbOut").textContent.slice(0, 200));
+  expectCheck("ports:usb", "INFO", "USB device recorded"); expectCheck("ports:usb-open", "INFO", "Windows-claimed device can't be opened, handled calmly");
+  click("#btPick"); await waitFor(() => check("ports:ble-battery").status !== "missing", 3000);
+  expectCheck("ports:ble", "PASS", "BLE connects"); expectCheck("ports:ble-battery", "PASS", "BLE battery 73%");
+  expect(q("#btOut").textContent.includes("73%") && q("#btOut").textContent.includes("Acme"), "BLE battery and manufacturer shown", q("#btOut").textContent);
+
+
+  scenario("Appliances (hair dryer, fan...) by sound, vibration, magnetic field");
+  const probe2 = new W.AudioContext(); await probe2.resume().catch(() => {}); const audioOK2 = probe2.state === "running"; probe2.close();
+  const am = mock.installMedia(W);
+  await open("appliance");
+  if (!audioOK2) skip("Appliance sound tests", "the test page's audio engine is blocked; click the page and run again");
+  else {
+    click("#apStart"); await waitFor(() => !q("#apBody").classList.contains("hidden"), 5000);
+    expect(!q("#apBody").classList.contains("hidden"), "microphone starts and the recorder appears");
+    await tclick("#apBase"); await settle("#apBase");
+    expect(check("appliance:background").status === "INFO" && q("#apTable tbody").children.length === 1, "background recorded and listed");
+    q("#apLabel").value = "Off"; await tclick("#apRun"); await settle("#apRun");
+    expectCheck("appliance:run-Off", "FAIL", "Appliance not running is detected");
+    am.setTalking(true); q("#apLabel").value = "Low"; await tclick("#apRun"); await settle("#apRun");
+    expectCheck("appliance:run-Low", "PASS", "Running appliance passes"); expect(/220 Hz/.test(check("appliance:run-Low").text), "names its main tone (220 Hz)", check("appliance:run-Low").text);
+    expect(q("#apTable tbody").children.length === 3 && !q("#apSpec").classList.contains("hidden"), "runs listed with a spectrum picture");
+    q("#apLabel").value = "Low again"; await tclick("#apRun"); await settle("#apRun");
+    expectCheck("appliance:compare", "WARN", "Two settings that sound identical are flagged");
+    am.osc.frequency.value = 440; am.gain.gain.value = 0.9; q("#apLabel").value = "High"; await tclick("#apRun"); await settle("#apRun");
+    expectCheck("appliance:compare", "PASS", "A higher speed that sounds different passes"); expect(/\b4[34]\d Hz/.test(check("appliance:run-High").text), "high setting reports about 440 Hz", check("appliance:run-High").text);
+    am.osc.frequency.value = 220; const wobble = setInterval(() => { am.gain.gain.value = am.gain.gain.value > 0.1 ? 0.01 : 0.4; }, 170);
+    q("#apLabel").value = "Rattle"; await tclick("#apRun"); await settle("#apRun"); clearInterval(wobble);
+    expectCheck("appliance:run-Rattle", "WARN", "Stuttering or rattling appliance warns"); expect(check("appliance:run-Rattle").text.includes("Loudness varies"), "explains the loudness variation");
+    click("#apClear"); expect(q("#apTable").classList.contains("hidden"), "Clear empties the table");
+  }
+  am.stop();
+  const sens = mock.installSensors(W);
+  await open("appliance");
+  sens.startMotion(1.5, 12); await tclick("#apVib"); await settle("#apVib"); sens.stopMotion();
+  const vr = check("appliance:vibration"); expect(vr.status === "INFO" && /moderate/.test(vr.text) && /about 1[12]\.\d Hz/.test(vr.text), "phone vibration: moderate, about 12 Hz", vr.status + " " + vr.text);
+  sens.startMotion(0, 1); await tclick("#apVib"); await settle("#apVib"); sens.stopMotion();
+  expectCheck("appliance:vibration", "WARN", "A phone that isn't shaking warns");
+  await tclick("#apVib"); await settle("#apVib"); expectCheck("appliance:vibration", "INFO", "No motion events (desktop) explained calmly");
+  sens.field = 48; await tclick("#apMagOff"); await settle("#apMagOff"); expectCheck("appliance:magnetic", "INFO", "Field off recorded");
+  sens.field = 75; await tclick("#apMagOn"); await settle("#apMagOn"); expectCheck("appliance:magnetic", "PASS", "27 uT change detects the running motor");
+  sens.field = 49; await tclick("#apMagOn"); await settle("#apMagOn"); expectCheck("appliance:magnetic", "WARN", "No change in field warns");
+  delete W.Magnetometer; await tclick("#apMagOn"); await sleep(300); expectCheck("appliance:magnetic", "INFO", "No magnetometer: explained, no crash");
+
+  scenario("Overview and report");
+  await open("overview"); await sleep(500);
+  const rows = [...D.querySelectorAll("#ovRows tr")];
+  expect(rows.length === 11, `overview lists all 11 testable device types (${rows.length} rows)`);
+  expect(rows.some(r => r.textContent.includes("Raw HID") && r.textContent.includes("Mock Arcade Stick")), "already-allowed HID device is listed");
+  expect(rows.some(r => r.textContent.includes("1 serial port") && r.textContent.includes("1 USB device")), "already-allowed serial and USB counts shown");
+  D.querySelector('[data-go="mouse"]').click(); await sleep(150); expect(lab().current === "mouse", "Open button jumps to the tab");
+  const txt = lab().summaryText(); expect(txt.includes("[PASS]") && txt.includes("[FAIL]") && txt.includes("keyboard:"), "text summary includes results from every tab so far");
+  expect(!D.getElementById("resultsCard").classList.contains("hidden") && D.querySelectorAll("#results tr").length === lab().results.size, "checks table matches stored results");
+  D.getElementById("btnClear").click(); expect(lab().results.size === 0 && D.getElementById("resultsCard").classList.contains("hidden"), "Clear checks empties the report");
+  expect(lab().modules.length === 12 && [...D.querySelectorAll("#tabs button")].length === 12, "12 tabs registered");
+}
+
+async function main() {
+  const t0 = Date.now(); const sum = document.getElementById("summary");
+  try {
+    unitTests();
+    sum.textContent = "Unit tests done; driving the page…";
+    await loadApp();
+    const errors = []; W.addEventListener("error", e => errors.push(e.message)); W.addEventListener("unhandledrejection", e => errors.push(String(e.reason)));
+    scenario("Page loads"); expect(!!W.deviceLab && lab().modules.length === 12, "Device Lab starts with 12 modules", "deviceLab=" + !!W.deviceLab);
+    for (const m of lab().modules) { await open(m.id); expect(D.querySelector(`[data-module=${m.id}]`)?.children.length > 0 && !D.querySelector("#panel p.err")?.textContent.includes("failed to start"), `${m.title} tab mounts with content`, D.getElementById("panel").textContent.slice(0, 200)); }
+    await gamepadScenarios();
+    await inputScenarios();
+    await mediaScenarios();
+    await deviceScenarios();
+    scenario("No script errors"); expect(errors.length === 0, "page raised no uncaught errors", errors.join(" | "));
+  } catch (e) { expect(false, "Runner crashed", e.stack || e.message); }
+  const s = `${failed ? "FAILED" : "All passed"}: ${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""} (${Math.round((Date.now() - t0) / 1000)}s)`;
+  sum.textContent = s; sum.className = failed ? "fail" : "pass"; document.title = (failed ? "FAIL " : "PASS ") + s; document.getElementById("again").hidden = false;
+  window.testResult = { passed, failed, skipped, done: true };
+}
+document.getElementById("again").onclick = () => location.reload();
+main();
+</script>
+</body>
+</html>

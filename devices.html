@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Lab</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' rx='3' fill='%232f6fde'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='white'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1b1f24; --muted: #5d6673; --border: #dde1e6;
+    --accent: #2f6fde; --ok: #1f8a4c; --bad: #c62f2f; --warn: #b7791f; --code: #eef0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171b; --card: #1d2127; --text: #e6e9ed; --muted: #9aa3ae; --border: #2e343c;
+      --accent: #5b8ff0; --ok: #3cbf74; --bad: #ef5d5d; --warn: #e0a53c; --code: #262b32;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171b; --card: #1d2127; --text: #e6e9ed; --muted: #9aa3ae; --border: #2e343c;
+    --accent: #5b8ff0; --ok: #3cbf74; --bad: #ef5d5d; --warn: #e0a53c; --code: #262b32;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 940px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  .card h3 { font-size: .95rem; margin: 16px 0 6px; }
+  button { font: inherit; padding: 9px 16px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; cursor: pointer; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 7px 6px; border-top: 1px solid var(--border); vertical-align: top; text-align: left; }
+  th { font-size: .85em; color: var(--muted); font-weight: 600; }
+  td.s { width: 70px; font-weight: 700; white-space: nowrap; }
+  .PASS { color: var(--ok); } .FAIL { color: var(--bad); } .WARN { color: var(--warn); } .INFO { color: var(--muted); }
+  .detail { color: var(--muted); font-size: .9em; word-break: break-word; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: .9em; }
+  pre { background: var(--code); padding: 10px; border-radius: 8px; max-height: 260px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; margin: 0; }
+  .note { background: var(--code); border-radius: 8px; padding: 10px 12px; margin-top: 12px; font-size: .92em; }
+  .meter { height: 10px; background: var(--code); border-radius: 5px; overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--accent); transition: width .06s; }
+  .hidden { display: none !important; }
+  .err { color: var(--bad); font-weight: 600; }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+  .tabs button { background: transparent; color: var(--muted); border-radius: 8px 8px 0 0; padding: 8px 12px; font-weight: 600; border-bottom: 2px solid transparent; }
+  .tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+  .tabs button.na { opacity: .45; }
+  select, input[type=text], input[type=number] { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
+  canvas.pad { width: 200px; height: 200px; max-width: 100%; background: var(--code); border-radius: 50%; display: block; margin: 0 auto; }
+  .btngrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+  .btngrid div { border: 1px solid var(--border); border-radius: 8px; padding: 8px 4px; text-align: center; font-size: .85em; font-weight: 600; color: var(--muted); }
+  .btngrid div.seen { border-color: var(--ok); color: var(--ok); }
+  .btngrid div.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .bar { display: grid; grid-template-columns: 90px 1fr 60px; gap: 10px; align-items: center; margin: 5px 0; }
+  .kb { overflow-x: auto; padding-bottom: 6px; }
+  .kbrow { display: flex; gap: 3px; margin-bottom: 3px; width: max-content; }
+  .key { height: 34px; border: 1px solid var(--border); border-radius: 5px; font-size: 11px; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+  .key.gap { border: 0; }
+  .key.seen { border-color: var(--ok); color: var(--ok); }
+  .key.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pointerzone { height: 220px; border: 2px dashed var(--border); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: var(--muted); text-align: center; user-select: none; touch-action: none; background: var(--code); }
+  .pointerzone.live { border-color: var(--accent); }
+  .tgrid { display: grid; gap: 2px; touch-action: none; user-select: none; }
+  .tgrid div { background: var(--code); border-radius: 3px; min-height: 36px; }
+  .tgrid div.hit { background: var(--ok); opacity: .75; }
+  video, .vid { max-width: 100%; border-radius: 8px; background: #000; display: block; }
+  .fsfill { position: fixed; inset: 0; z-index: 99; display: flex; align-items: flex-end; justify-content: center; color: #888; font-size: 13px; padding: 14px; cursor: pointer; }
+  @media (max-width: 520px) { .bar { grid-template-columns: 70px 1fr 50px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Device Lab</h1>
+  <p class="sub">Plug something in and test it right in the browser: gamepads (Xbox, Switch, 8BitDo, generic), keyboard, mouse, touch, microphone, speakers, camera, MIDI instruments, raw USB/HID/serial/Bluetooth devices and your display. Use Chrome or Edge.</p>
+
+  <div class="card">
+    <div class="tabs" id="tabs"></div>
+    <div id="panel"></div>
+  </div>
+
+  <div id="resultsCard" class="card hidden">
+    <h2>Checks</h2>
+    <table><tbody id="results"></tbody></table>
+    <div class="row">
+      <button id="btnCopy" class="secondary">Copy text summary</button>
+      <button id="btnJson" class="secondary">Download data (JSON)</button>
+      <button id="btnClear" class="secondary">Clear checks</button>
+      <span id="shareStatus" class="detail"></span>
+    </div>
+  </div>
+
+  <details class="card">
+    <summary>Raw log</summary>
+    <pre id="log"></pre>
+  </details>
+</main>
+<script type="module" src="devices/app.js"></script>
+</body>
+</html>
