@@ -2,6 +2,10 @@
 
 A browser tool that tests hardware you plug in, using Chrome or Edge on a computer: gamepads, keyboard, mouse, touch, audio, camera, MIDI, raw HID/serial/USB/Bluetooth devices, appliances, and your display. One tab per kind of device, one shared report.
 
+**Use it online (no install): https://libyan11.github.io/device-lab/**
+
+Use Chrome or Edge on a computer. Everything runs in your browser; nothing is uploaded.
+
 ## Run
 
 Double-click `start.bat`. It serves the folder at http://127.0.0.1:8791 and opens http://127.0.0.1:8791/devices.html in Chrome (USB, HID, serial and the camera need a secure origin like localhost). Requires Python (`py`) and Chrome. Close the window to stop the server.
