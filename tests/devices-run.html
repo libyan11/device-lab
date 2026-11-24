@@ -190,6 +190,23 @@ function unitTests() {
   const vs = core.vibrationStats(vib);
   expect(near(vs.hz, 12, 0.3) && near(vs.rms, 1.06, 0.1) && near(vs.rate, 60, 1), "vibration: 12 Hz, 1.5 m/s2 amplitude measured", JSON.stringify(vs));
   expect(core.vibrationStats(vib.slice(0, 5)).hz === 0 && core.vibrationStats(vib.map(s => ({ t: s.t, v: 9.81 }))).rms < 0.001, "vibration: too few samples and a still phone give nothing / zero");
+
+  scenario("Analysis code: storage test blocks and speed");
+  const B = 1 << 20, blk = new Uint8Array(B), scr = new Uint8Array(B); core.fillBlock(blk, 7);
+  expect(core.verifyBlock(blk, 7, scr).ok && core.verifyBlock(blk, 7).foundIndex === 7, "a block verifies against its own index");
+  const other = core.verifyBlock(blk, 9, scr); expect(!other.ok && other.foundIndex === 7, "a block from the wrong place reports where it came from", JSON.stringify(other));
+  const flipped = blk.slice(); flipped[5000] ^= 1; const fv = core.verifyBlock(flipped, 7, scr); expect(!fv.ok && fv.foundIndex === 7 && fv.badWords === 1, "one flipped bit is caught and counted", JSON.stringify(fv));
+  const junk = new Uint8Array(B).fill(0xAB); expect(core.verifyBlock(junk, 7, scr).foundIndex === -1, "unwritten/garbage data has no valid header");
+  const b8 = new Uint8Array(B); core.fillBlock(b8, 8); let same = 0; const u7 = new Uint32Array(blk.buffer), u8 = new Uint32Array(b8.buffer); for (let i = 2; i < 1000; i++) if (u7[i] === u8[i]) same++;
+  expect(same < 5, "different blocks hold different data");
+  const steadyW = Array.from({ length: 40 }, () => ({ bytes: 4e6, ms: 20 })), spd = core.speedStats(steadyW);
+  expect(near(spd.avg, 200, 1) && spd.drop < 0.05, "steady 200 MB/s measured, no drop", JSON.stringify(spd));
+  const cliff = [...Array.from({ length: 150 }, () => ({ bytes: 4e6, ms: 20 })), ...Array.from({ length: 30 }, () => ({ bytes: 4e6, ms: 200 }))], sc = core.speedStats(cliff);
+  expect(sc.drop > 0.7 && sc.first > 150 && sc.last < 30, "a drive that drops from 200 to 20 MB/s is seen as a cliff", JSON.stringify(sc));
+  expect(core.rateStorage(150, 400).status === "PASS" && core.rateStorage(5, 35).status === "WARN" && core.rateStorage(1.5, 20).status === "FAIL" && core.rateStorage(40, 90).cls.includes("budget"), "speed ratings: fast passes, slow warns, very slow fails");
+  const wrapRes = [{ index: 0, ok: false, foundIndex: 16 }, { index: 1, ok: false, foundIndex: 17 }, { index: 8, ok: false, foundIndex: 16 }, { index: 16, ok: true, foundIndex: 16 }], is = core.integritySummary(wrapRes, B);
+  expect(is.wrongBlocks === 3 && is.bad === 3 && is.good === 1 && is.realBytes === 8 * B, "wrap-around evidence gives the real size from the smallest forward jump", JSON.stringify(is));
+  expect(core.integritySummary([{ index: 3, ok: false, foundIndex: 3 }], B).corruptBlocks === 1 && core.integritySummary([], B).total === 0, "corruption is counted separately from wrap-around");
   const lb = new core.LineBuffer();
   expect(JSON.stringify(lb.push("ab\r\ncd")) === '["ab"]' && JSON.stringify(lb.push("ef\n")) === '["cdef"]', "serial line buffer joins split chunks");
   expect(core.usbClassName(3) === "HID (human interface)" && core.usbClassName(0x42).startsWith("Class") && core.vendorName(0x045e) === "Microsoft", "USB class and vendor names");
@@ -454,17 +471,49 @@ async function deviceScenarios() {
   sens.field = 49; await tclick("#apMagOn"); await settle("#apMagOn"); expectCheck("appliance:magnetic", "WARN", "No change in field warns");
   delete W.Magnetometer; await tclick("#apMagOn"); await sleep(300); expectCheck("appliance:magnetic", "INFO", "No magnetometer: explained, no crash");
 
+
+  scenario("Storage: USB drive speed, integrity, counterfeit capacity");
+  const runStorage = async (opts, size) => {
+    const drv = mock.installStorage(W, opts); await open("storage");
+    await tclick("#stPick"); await waitFor(() => !q("#stStart").disabled, 3000);
+    q("#stSize").value = size; await tclick("#stStart"); await settle("#stStart"); return drv;
+  };
+  let sd = await runStorage({ kind: "genuine" }, "16");
+  expect(q("#stFolder").textContent.includes("TESTDRIVE"), "chosen folder is shown");
+  expectCheck("storage:write", "PASS", "Write speed measured"); expectCheck("storage:read", "PASS", "Read speed measured");
+  expectCheck("storage:integrity", "PASS", "Every block read back intact"); expect(/All \d+ blocks \(16 MB\)/.test(check("storage:integrity").text), "integrity names the 16 MB tested", check("storage:integrity").text);
+  expectCheck("storage:capacity", "INFO", "Small test says capacity isn't proven"); expectCheck("storage:small", "PASS", "Small files read and written correctly");
+  expect(sd.root.children.size === 0 && sd.st.used === 0, "temporary test folder is deleted afterwards (nothing left on the drive)", "left: " + [...sd.root.children.keys()].join());
+  sd = await runStorage({ kind: "corrupt" }, "16");
+  expectCheck("storage:integrity", "FAIL", "Corrupted block is detected"); expect(/corrupted/.test(check("storage:integrity").text), "reported as corruption, not as a fake drive", check("storage:integrity").text);
+  expect(sd.root.children.size === 0, "corrupt drive test also cleans up");
+  sd = await runStorage({ kind: "genuine", capacity: 40 << 20 }, "fill");
+  expectCheck("storage:capacity", "PASS", "Honest 40 MB drive fills and verifies"); expect(/held 32 MB/.test(check("storage:capacity").text) && /reported it was full/.test(check("storage:capacity").text), "capacity states how much was verified", check("storage:capacity").text);
+  expectCheck("storage:integrity", "PASS", "Everything written to the honest drive is intact"); expect(sd.root.children.size === 0, "fill mode cleans up too");
+  sd = await runStorage({ kind: "fake", capacity: 96 << 20, realCapacity: 32 << 20 }, "fill");
+  expectCheck("storage:capacity", "FAIL", "Drive claiming 96 MB with 32 MB of real memory is exposed"); expect(/COUNTERFEIT/.test(check("storage:capacity").text) && /about 32 MB/.test(check("storage:capacity").text), "estimates the real size (32 MB)", check("storage:capacity").text);
+  expectCheck("storage:integrity", "FAIL", "Overwritten data is reported"); expect(/different place/.test(check("storage:integrity").text), "integrity explains data came from a different place", check("storage:integrity").text);
+  expect(sd.root.children.size === 0, "counterfeit test cleans up too");
+  W.showDirectoryPicker = async () => { throw new DOMException("Can't open this folder because it contains system files", "SecurityError"); };
+  await open("storage"); await tclick("#stPick"); await sleep(300);
+  expectCheck("storage:folder", "FAIL", "Refused folder is explained"); expect(q("#stStart").disabled, "Start stays disabled without a folder");
+  W.showDirectoryPicker = async () => { throw new DOMException("cancelled", "AbortError"); };
+  lab().results.delete("storage:folder"); D.querySelector('tr[data-key="storage:folder"]')?.remove(); await tclick("#stPick"); await sleep(300); expect(check("storage:folder").status === "missing", "cancelling the picker is silent");
+  Object.defineProperty(W, "showDirectoryPicker", { configurable: true, value: undefined, writable: true });
+  await open("storage"); expect(!!D.querySelector("#panel .err") && D.querySelector("#panel .err").textContent.includes("write to folders"), "browser without folder access shows a clear message");
+
   scenario("Overview and report");
   await open("overview"); await sleep(500);
   const rows = [...D.querySelectorAll("#ovRows tr")];
-  expect(rows.length === 11, `overview lists all 11 testable device types (${rows.length} rows)`);
+  expect(rows.length === 12, `overview lists all 12 testable device types (${rows.length} rows)`);
   expect(rows.some(r => r.textContent.includes("Raw HID") && r.textContent.includes("Mock Arcade Stick")), "already-allowed HID device is listed");
   expect(rows.some(r => r.textContent.includes("1 serial port") && r.textContent.includes("1 USB device")), "already-allowed serial and USB counts shown");
+  expect(D.getElementById("startErr").classList.contains("hidden"), "start-up warning stays hidden when the app runs normally");
   D.querySelector('[data-go="mouse"]').click(); await sleep(150); expect(lab().current === "mouse", "Open button jumps to the tab");
   const txt = lab().summaryText(); expect(txt.includes("[PASS]") && txt.includes("[FAIL]") && txt.includes("keyboard:"), "text summary includes results from every tab so far");
   expect(!D.getElementById("resultsCard").classList.contains("hidden") && D.querySelectorAll("#results tr").length === lab().results.size, "checks table matches stored results");
   D.getElementById("btnClear").click(); expect(lab().results.size === 0 && D.getElementById("resultsCard").classList.contains("hidden"), "Clear checks empties the report");
-  expect(lab().modules.length === 12 && [...D.querySelectorAll("#tabs button")].length === 12, "12 tabs registered");
+  expect(lab().modules.length === 13 && [...D.querySelectorAll("#tabs button")].length === 13, "13 tabs registered");
 }
 
 async function main() {
@@ -474,7 +523,7 @@ async function main() {
     sum.textContent = "Unit tests done; driving the page…";
     await loadApp();
     const errors = []; W.addEventListener("error", e => errors.push(e.message)); W.addEventListener("unhandledrejection", e => errors.push(String(e.reason)));
-    scenario("Page loads"); expect(!!W.deviceLab && lab().modules.length === 12, "Device Lab starts with 12 modules", "deviceLab=" + !!W.deviceLab);
+    scenario("Page loads"); expect(!!W.deviceLab && lab().modules.length === 13, "Device Lab starts with 13 modules", "deviceLab=" + !!W.deviceLab);
     for (const m of lab().modules) { await open(m.id); expect(D.querySelector(`[data-module=${m.id}]`)?.children.length > 0 && !D.querySelector("#panel p.err")?.textContent.includes("failed to start"), `${m.title} tab mounts with content`, D.getElementById("panel").textContent.slice(0, 200)); }
     await gamepadScenarios();
     await inputScenarios();

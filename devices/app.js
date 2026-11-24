@@ -13,8 +13,9 @@ import hid from "./mod-hid.js";
 import ports from "./mod-ports.js";
 import display from "./mod-display.js";
 import appliance from "./mod-appliance.js";
+import storage from "./mod-storage.js";
 
-const MODULES = [overview, gamepad, keyboard, mouse, touch, audio, camera, midi, hid, ports, appliance, display];
+const MODULES = [overview, gamepad, keyboard, mouse, touch, audio, camera, midi, hid, ports, storage, appliance, display];
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));

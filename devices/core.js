@@ -355,3 +355,46 @@ export function vibrationStats(samples, { minHz = 1 } = {}) {
   return { rms, hz: best, n, rate };
 }
 export const fieldStrength = (x, y, z) => Math.hypot(x, y, z);
+
+// ---------- storage (USB drives, SSDs, SD cards) ----------
+// Each test block starts with its own index (and the inverted index as a check), followed by a pseudo-random stream seeded from
+// that index. Reading a block back therefore says both "is it intact?" and, if not, "which other block's data is this?"
+// (which is how counterfeit drives that wrap around past their real size give themselves away).
+export function fillBlock(buf, index) {
+  const u = new Uint32Array(buf.buffer, buf.byteOffset, buf.byteLength >> 2);
+  let x = (Math.imul(index + 1, 2654435761) ^ 0x9E3779B9) >>> 0 || 1;
+  for (let i = 2; i < u.length; i++) { x = (x ^ (x << 13)) >>> 0; x ^= x >>> 17; x = (x ^ (x << 5)) >>> 0; u[i] = x; }
+  u[0] = index >>> 0; u[1] = ~index >>> 0;
+}
+// Returns { ok, foundIndex, badWords }. foundIndex is the block number stored in the data (-1 if the header is garbage).
+export function verifyBlock(buf, expectedIndex, scratch) {
+  const u = new Uint32Array(buf.buffer, buf.byteOffset, buf.byteLength >> 2);
+  const headerOk = u.length >= 2 && u[1] === (~u[0] >>> 0), found = headerOk ? u[0] : -1;
+  if (found !== expectedIndex) return { ok: false, foundIndex: found, badWords: u.length };
+  scratch = scratch && scratch.byteLength === buf.byteLength ? scratch : new Uint8Array(buf.byteLength);
+  fillBlock(scratch, expectedIndex);
+  const e = new Uint32Array(scratch.buffer, scratch.byteOffset, scratch.byteLength >> 2); let bad = 0;
+  for (let i = 0; i < u.length; i++) if (u[i] !== e[i]) bad++;
+  return { ok: bad === 0, foundIndex: found, badWords: bad };
+}
+// samples: [{bytes, ms}] in order. Merges them into windows of at least minMs, so one fast cached block can't dominate.
+export function speedStats(samples, minMs = 500) {
+  const wins = []; let b = 0, t = 0;
+  for (const s of samples) { b += s.bytes; t += s.ms; if (t >= minMs) { wins.push(b / 1e6 / (t / 1000)); b = 0; t = 0; } }
+  const totalBytes = samples.reduce((a, s) => a + s.bytes, 0), totalMs = samples.reduce((a, s) => a + s.ms, 0);
+  const avg = totalMs ? totalBytes / 1e6 / (totalMs / 1000) : 0;
+  let first = avg, last = avg, drop = 0;
+  if (wins.length >= 6) { const k = Math.floor(wins.length / 3); first = mean(wins.slice(0, k)); last = mean(wins.slice(-k)); drop = first ? 1 - last / first : 0; }
+  return { avg, min: wins.length ? Math.min(...wins) : avg, max: wins.length ? Math.max(...wins) : avg, first, last, drop, windows: wins.length };
+}
+export function rateStorage(writeMBs, readMBs) {
+  const cls = readMBs >= 300 ? "fast USB 3 / SSD class" : readMBs >= 100 ? "good USB 3 class" : readMBs >= 30 ? "budget USB 3, or the USB 2 limit" : readMBs >= 10 ? "slow (USB 2 class)" : "very slow";
+  const status = writeMBs < 3 || readMBs < 10 ? "FAIL" : writeMBs < 10 || readMBs < 25 ? "WARN" : "PASS";
+  return { status, cls };
+}
+// After reading every block back: summarise integrity and capacity honesty. results: [{index, ok, foundIndex}] for every verified block.
+export function integritySummary(results, blockBytes) {
+  const bad = results.filter(r => !r.ok), wrongBlock = bad.filter(r => r.foundIndex >= 0 && r.foundIndex !== r.index), corrupt = bad.filter(r => r.foundIndex === r.index || r.foundIndex < 0);
+  const jumps = wrongBlock.filter(r => r.foundIndex > r.index).map(r => r.foundIndex - r.index), wrapped = jumps.length ? Math.min(...jumps) * blockBytes : 0;
+  return { total: results.length, good: results.length - bad.length, bad: bad.length, wrongBlocks: wrongBlock.length, corruptBlocks: corrupt.length, firstBad: bad.length ? bad[0].index : -1, realBytes: wrapped };
+}

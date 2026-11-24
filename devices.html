@@ -99,6 +99,19 @@
     <pre id="log"></pre>
   </details>
 </main>
+<div id="startErr" class="card hidden" style="border-color:var(--bad)">
+  <h2 class="err" style="margin-top:0">Device Lab didn't start</h2>
+  <p id="startErrText" style="margin:0"></p>
+</div>
+<script>
+  // If the app can't start (most often because the page was opened by double-clicking the file, which browsers block for
+  // security), say so plainly instead of showing a dead page.
+  (function () {
+    function show(msg) { var e = document.getElementById("startErr"); document.getElementById("startErrText").innerHTML = msg; e.classList.remove("hidden"); }
+    if (location.protocol === "file:") show("This page was opened as a file, and browsers block its scripts that way. Close it and double-click <b>start.bat</b> instead (it needs Python). It then opens <b>http://127.0.0.1:8790/devices.html</b> in Chrome.");
+    window.addEventListener("load", function () { setTimeout(function () { if (!window.deviceLab && location.protocol !== "file:") show("The scripts didn't load. Use <b>Chrome or Edge</b>, open the page through <b>start.bat</b> (or any local web server), and press Ctrl+F5. Details are in the browser console (F12)."); }, 2500); });
+  })();
+</script>
 <script type="module" src="devices/app.js"></script>
 </body>
 </html>

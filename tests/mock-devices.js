@@ -132,3 +132,26 @@ export function installSensors(W, { magnetometer = true } = {}) {
   else delete W.Magnetometer;
   return state;
 }
+
+// ---------- storage: an in-memory "drive" behind showDirectoryPicker ----------
+// kind: "genuine" (honest capacity), "corrupt" (flips a byte in one block it returns), "fake" (claims `capacity` but only has `realCapacity`
+// of memory, so data wraps around and overwrites older data, like a counterfeit flash drive).
+export function installStorage(W, { kind = "genuine", capacity = 64 << 20, realCapacity = 32 << 20 } = {}) {
+  const real = kind === "fake" ? realCapacity : capacity, ring = new Uint8Array(real);
+  const st = { cursor: 0, used: 0, reads: 0, claimed: capacity, kind };
+  const ioErr = () => new DOMException("No space left on device", "QuotaExceededError");
+  class File_ { constructor(name) { this.kind = "file"; this.name = name; this.start = 0; this.size = 0; }
+    async getFile() { const f = this; const read = (a, b) => { const out = new Uint8Array(Math.max(0, Math.min(b, f.size) - a)); for (let i = 0; i < out.length; i++) out[i] = ring[(f.start + a + i) % real]; if (kind === "corrupt" && ++st.reads === 3) out[1000] ^= 0xFF; return out; };
+      return { size: f.size, slice: (a, b) => ({ arrayBuffer: async () => read(a, b).buffer }), arrayBuffer: async () => read(0, f.size).buffer }; }
+    async createWritable() { const f = this, chunks = []; let pending = 0;
+      return { async write(d) { const c = new Uint8Array(d.buffer, d.byteOffset, d.byteLength).slice(); if (st.used + pending + c.length > capacity) throw ioErr(); chunks.push(c); pending += c.length; },
+        async close() { f.start = st.cursor; let off = 0; for (const c of chunks) { for (let i = 0; i < c.length; i++) ring[(f.start + off + i) % real] = c[i]; off += c.length; } f.size = off; st.cursor += off; st.used += off; },
+        async abort() { chunks.length = 0; pending = 0; } }; } }
+  class Dir_ { constructor(name) { this.kind = "directory"; this.name = name; this.children = new Map(); }
+    async getDirectoryHandle(n, o = {}) { let d = this.children.get(n); if (!d) { if (!o.create) throw new DOMException("not found", "NotFoundError"); d = new Dir_(n); this.children.set(n, d); } return d; }
+    async getFileHandle(n, o = {}) { let f = this.children.get(n); if (!f) { if (!o.create) throw new DOMException("not found", "NotFoundError"); f = new File_(n); this.children.set(n, f); } return f; }
+    async removeEntry(n) { const free = e => e.kind === "file" ? (st.used -= e.size) : [...e.children.values()].forEach(free); const e = this.children.get(n); if (e) { free(e); this.children.delete(n); } if (st.used <= 0) { st.used = 0; st.cursor = 0; } } }
+  const rootDir = new Dir_("TESTDRIVE");
+  W.showDirectoryPicker = async () => rootDir; W.confirm = () => true;
+  return { root: rootDir, st };
+}

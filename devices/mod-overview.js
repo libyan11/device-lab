@@ -30,6 +30,7 @@ export default {
       rows.push(["hid", "Raw HID", !!navigator.hid, h]);
       let p = "grant access on the tab"; try { const s = navigator.serial ? (await navigator.serial.getPorts()).length : 0, u = navigator.usb ? (await navigator.usb.getDevices()).length : 0; if (navigator.serial || navigator.usb) p = `${s} serial port(s), ${u} USB device(s) already allowed`; } catch (_) {}
       rows.push(["ports", "Serial / USB / Bluetooth LE", !!(navigator.serial || navigator.usb || navigator.bluetooth), p + (navigator.bluetooth ? "" : "")]);
+      rows.push(["storage", "USB drives, SSDs, SD cards", typeof window.showDirectoryPicker === "function", "pick a folder on the drive on the Storage tab"]);
       rows.push(["appliance", "Appliances (hair dryer, fan, vacuum…)", !!navigator.mediaDevices?.getUserMedia, "by sound; phone sensors for vibration and magnetic field" + (typeof Magnetometer !== "undefined" ? "" : " (no magnetometer here)")]);
       rows.push(["display", "Display", true, `${screen.width}×${screen.height} @${devicePixelRatio}x`]);
       $("ovRows").innerHTML = rows.map(([id, name, ok, plugged]) => `<tr><td>${ctx.esc(name)}</td><td>${yes(ok)}</td><td class="detail">${ctx.esc(plugged)}</td><td><button class="secondary" data-go="${id}">Open</button></td></tr>`).join("");

@@ -19,10 +19,20 @@ Double-click `start.bat`. It serves the folder at http://127.0.0.1:8790 and open
 | MIDI | Keyboards, pads, knobs, interfaces | Ports, notes, velocity range, controllers, stuck notes, test note out |
 | Raw HID | Any other HID device (arcade sticks, wheels, pedals, flight sticks, unknown controllers) | Device and usage info, report rate, which input bytes are buttons, analog axes or counters |
 | Serial / USB / BLE | Arduino/ESP32 boards, USB-serial adapters, any USB device, Bluetooth LE gadgets | Serial terminal, USB descriptors and speed, BLE battery and device info |
+| Storage | USB flash drives, SSDs, SD cards, external disks | Real write and read speed, sustained speed (cache running out), data integrity of everything written, small-file speed, and in fill mode a counterfeit-capacity check |
 | Appliances | Anything with no data connection: hair dryer, fan, vacuum, blender, shaver, fridge, drill | Sound signature (running vs background, main tone, steadiness, mains hum, speed settings really differ), vibration and magnetic field via a phone's motion sensor and compass. Not an electrical safety test |
 | Display | Monitor, laptop screen | Colour-fill dead-pixel test, real refresh rate, dropped frames |
 
 The Overview tab shows which of these your browser supports and what is already plugged in.
+
+### Testing a USB drive or SSD
+
+1. Make an empty folder on the drive (for example `E:\speedtest`) and click **Choose folder on the drive**. Browsers won't open a drive's root.
+2. Pick a size and **Start test**. The test creates a temporary sub-folder in that folder, writes known data, reads every block back, and deletes only what it created. 1 GB or more gives a fair read speed, because small tests are served from your computer's memory cache.
+3. Read the report: write and read MB/s, whether speed collapses once the drive's cache fills, whether every block came back intact, and small-file speed.
+4. **Fill all free space** writes until the drive is full, then verifies everything. A counterfeit drive that claims a big size but only has a little real memory overwrites its old data, and this mode catches it and estimates the real size. It can take hours on a big drive. Never use it on your system drive.
+
+The browser cannot see a drive's label or free space, so it can't tell whether the folder you chose is really on a USB drive; that's up to you.
 
 ### Testing an appliance (for example a hair dryer)
 
