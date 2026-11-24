@@ -7,7 +7,14 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-set URL=http://127.0.0.1:8790/devices.html
+set URL=http://127.0.0.1:8791/devices.html
+netstat -ano | findstr /R /C:":8791 .*LISTENING" >nul
+if not errorlevel 1 (
+  echo Port 8791 is already in use, probably by another copy of this window. Close it and run start.bat again.
+  echo If Device Lab is already running, open %URL% yourself.
+  pause
+  exit /b 1
+)
 set BROWSER=
 if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set BROWSER=%ProgramFiles%\Google\Chrome\Application\chrome.exe
 if not defined BROWSER if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set BROWSER=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe
@@ -20,5 +27,5 @@ if not defined BROWSER (
 rem Open the browser a moment after the server starts, so the page is never requested before the server is up.
 start "" /b cmd /c "timeout /t 2 /nobreak >nul & start "" "%BROWSER%" %URL%"
 echo Serving Device Lab at %URL%  - close this window to stop.
-py -m http.server 8790 --bind 127.0.0.1
-if errorlevel 1 echo.& echo The server stopped. If port 8790 is already in use, close the other window running start.bat and try again.& pause
+py -m http.server 8791 --bind 127.0.0.1
+if errorlevel 1 echo.& echo The server stopped. Close any other window running start.bat and try again.& pause

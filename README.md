@@ -4,7 +4,9 @@ A browser tool that tests hardware you plug in, using Chrome or Edge on a comput
 
 ## Run
 
-Double-click `start.bat`. It serves the folder at http://127.0.0.1:8790 and opens http://127.0.0.1:8790/devices.html in Chrome (USB, HID, serial and the camera need a secure origin like localhost). Requires Python (`py`) and Chrome. Close the window to stop the server.
+Double-click `start.bat`. It serves the folder at http://127.0.0.1:8791 and opens http://127.0.0.1:8791/devices.html in Chrome (USB, HID, serial and the camera need a secure origin like localhost). Requires Python (`py`) and Chrome. Close the window to stop the server.
+
+If you see a **404 error**, the browser reached some other server. Close every `start.bat` window, run Device Lab's `start.bat` again, and open `http://127.0.0.1:8791/devices.html` (the address `http://127.0.0.1:8791/` also redirects there). Opening `devices.html` by double-clicking the file does not work.
 
 ## What it tests
 
